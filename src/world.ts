@@ -2,29 +2,39 @@
  * @module ecs/ECS
  * @type {class}
  */
-const Entity = require('./entity');
-const Query = require('./query');
-const ComponentPool = require('./componentpool');
-const EntityPool = require('./entitypool');
-const setupApeDestroy = require('./cleanup');
+import Entity from "./entity";
+import Query from "./query";
+import ComponentPool from "./component-pool";
+import EntityPool from "./entity-pool";
+import setupApeDestroy from "./clean-up";
+import type { System } from "./system";
+import {
+  ComponentClass,
+  IEntityByType,
+  IEntityConfig,
+  IEntityObject,
+  IQueryConfig,
+  IWorldConfig,
+} from "./types";
+import type Component from "./component";
 
 const componentReserved = new Set([
-  'constructor',
-  'init',
-  'type',
-  'key',
-  'destroy',
-  'preDestroy',
-  'postDestroy',
-  'getObject',
-  '_setup',
-  '_reset',
-  'update',
-  'clone',
-  '_meta',
-  '_addRef',
-  '_deleteRef',
-  'prototype'
+  "constructor",
+  "init",
+  "type",
+  "key",
+  "destroy",
+  "preDestroy",
+  "postDestroy",
+  "getObject",
+  "_setup",
+  "_reset",
+  "update",
+  "clone",
+  "_meta",
+  "_addRef",
+  "_deleteRef",
+  "prototype",
 ]);
 
 /**
@@ -33,36 +43,44 @@ const componentReserved = new Set([
  * Create multiple World instances in order to have multiple collections.
  * @exports World
  */
-module.exports = class World {
-  constructor(config) {
+export default class World {
+  private _currentTick = 0;
+  get currentTick() {
+    return this._currentTick;
+  }
+  public readonly entities = new Map<string, Entity>();
+  private readonly types = {};
+  public readonly tags = new Set<string>();
+  public readonly entitiesByComponent: IEntityByType = {};
+  public readonly componentsById = new Map();
+  public readonly entityReverse: Record<
+    string,
+    Record<string, Map<string, number>>
+  > = {};
+  private readonly updatedEntities = new Set<Entity>();
+  public readonly componentTypes: Record<string, ComponentClass> = {};
+  private readonly components = new Map();
+  public readonly queries: Query[] = [];
+  public readonly subscriptions = new Map();
+  private readonly systems = new Map();
+  public readonly refs: Record<string, Set<string>> = {};
+  public readonly componentPool = new Map();
+  private _statCallback: ((str: string) => void) | null = null;
+  private _statTicks = 0;
+  private _nextStat = 0;
+  public readonly entityPool: EntityPool;
+
+  constructor(readonly config: IWorldConfig) {
     this.config = Object.assign(
       {
         trackChanges: true,
         entityPool: 10,
         cleanupPools: true,
-        useApeDestroy: false
+        useApeDestroy: false,
       },
       config
     );
-    this.currentTick = 0;
-    this.entities = new Map();
-    this.types = {};
-    this.tags = new Set();
-    this.entitiesByComponent = {};
-    this.componentsById = new Map();
-    this.entityReverse = {};
-    this.updatedEntities = new Set();
-    this.componentTypes = {};
-    this.components = new Map();
-    this.queries = [];
-    this.subscriptions = new Map();
-    this.systems = new Map();
-    this.refs = {};
-    this.componentPool = new Map();
-    this._statCallback = null;
-    this._statTicks = 0;
-    this._nextStat = 0;
-    this.entityPool = new EntityPool(this, this.config.entityPool);
+    this.entityPool = new EntityPool(this, this.config.entityPool!);
     if (this.config.useApeDestroy) {
       setupApeDestroy(this);
     }
@@ -74,14 +92,15 @@ module.exports = class World {
    */
   tick() {
     if (this.config.useApeDestroy) {
-      this.runSystems('ApeCleanup');
+      this.runSystems("ApeCleanup");
     }
-    this.currentTick++;
+    this._currentTick++;
     this.updateIndexes();
     this.entityPool.release();
     // istanbul ignore else
     if (this.config.cleanupPools) {
       this.entityPool.cleanup();
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for (const [key, pool] of this.componentPool) {
         pool.cleanup();
       }
@@ -92,29 +111,42 @@ module.exports = class World {
         this._outputStats();
       }
     }
-    return this.currentTick;
+    return this._currentTick;
   }
 
   getStats() {
-    const stats = {
+    const stats: {
+      entity: {
+        active: number;
+        pooled: number;
+        target: number;
+      };
+      components: {
+        [key: string]: {
+          active: number;
+          pooled: number;
+          target: number;
+        };
+      };
+    } = {
       entity: {
         active: this.entities.size,
         pooled: this.entityPool.pool.length,
-        target: this.entityPool.targetSize
+        target: this.entityPool.targetSize,
       },
-      components: {}
+      components: {},
     };
     for (const [key, pool] of this.componentPool) {
       stats.components[key] = {
         active: pool.active,
         pooled: pool.pool.length,
-        target: pool.targetSize
+        target: pool.targetSize,
       };
     }
     return stats;
   }
 
-  logStats(freq, callback) {
+  logStats(freq: number, callback?: (str: string) => void): void {
     // istanbul ignore next
     if (callback === undefined) {
       callback = console.log;
@@ -127,23 +159,33 @@ module.exports = class World {
   _outputStats() {
     const stats = this.getStats();
     this._nextStat = 0;
-    let output = `${this.currentTick}, Entities: ${stats.entity.active} active, ${stats.entity.pooled}/${stats.entity.target} pooled`;
+    let output = `${this._currentTick}, Entities: ${stats.entity.active} active, ${stats.entity.pooled}/${stats.entity.target} pooled`;
     for (const key of Object.keys(stats.components)) {
       const cstat = stats.components[key];
-      output += `\n${this.currentTick}, ${key}: ${cstat.active} active, ${cstat.pooled}/${cstat.target} pooled`;
+      output += `\n${this._currentTick}, ${key}: ${cstat.active} active, ${cstat.pooled}/${cstat.target} pooled`;
     }
-    this._statCallback(output);
+    this._statCallback!(output);
   }
 
-  _addRef(target, entity, component, prop, sub, key, type) {
+  _addRef(
+    target: string,
+    entity: string,
+    component: string,
+    prop: string,
+    sub: string | undefined,
+    key: string,
+    type: string
+  ) {
     if (!this.refs[target]) {
       this.refs[target] = new Set();
     }
-    const eInst = this.getEntity(target);
-    if (!this.entityReverse.hasOwnProperty(target)) {
+    // const eInst = this.getEntity(target);
+    if (!Object.prototype.hasOwnProperty.call(this.entityReverse, target)) {
       this.entityReverse[target] = {};
     }
-    if (!this.entityReverse[target].hasOwnProperty(key)) {
+    if (
+      !Object.prototype.hasOwnProperty.call(this.entityReverse[target], key)
+    ) {
       this.entityReverse[target][key] = new Map();
     }
     const reverse = this.entityReverse[target][key];
@@ -154,20 +196,28 @@ module.exports = class World {
     }
     /* $lab:coverage:on$ */
     reverse.set(entity, count + 1);
-    this.refs[target].add([entity, component, prop, sub].join('...'));
+    this.refs[target].add([entity, component, prop, sub].join("..."));
     this._sendChange({
-      op: 'addRef',
+      op: "addRef",
       component: component,
       type: type,
       property: prop,
       target,
-      entity
+      entity,
     });
   }
 
-  _deleteRef(target, entity, component, prop, sub, key, type) {
+  _deleteRef(
+    target: string,
+    entity: string,
+    component: string,
+    prop: string,
+    sub: string | undefined,
+    key: string,
+    type: string
+  ) {
     const ref = this.entityReverse[target][key];
-    let count = ref.get(entity);
+    let count = ref.get(entity)!;
     count--;
     // istanbul ignore else
     if (count < 1) {
@@ -176,19 +226,20 @@ module.exports = class World {
       ref.set(entity, count);
     }
     if (ref.size === 0) {
+      //@ts-expect-error : TODO: check later
       delete ref[key];
     }
-    this.refs[target].delete([entity, component, prop, sub].join('...'));
+    this.refs[target].delete([entity, component, prop, sub].join("..."));
     if (this.refs[target].size === 0) {
       delete this.refs[target];
     }
     this._sendChange({
-      op: 'deleteRef',
+      op: "deleteRef",
       component,
       type: type,
       target,
       entity,
-      property: prop
+      property: prop,
     });
   }
 
@@ -205,10 +256,10 @@ module.exports = class World {
    * @example
    * ecs.registerTags['Item', 'Blocked']);
    */
-  registerTags(...tags) {
+  registerTags(...tags: string[]): void {
     for (const tag of tags) {
       // istanbul ignore if
-      if (this.entitiesByComponent.hasOwnProperty(tag)) {
+      if (Object.prototype.hasOwnProperty.call(this.entitiesByComponent, tag)) {
         throw new Error(`Cannot register tag "${tag}", name is already taken.`);
       }
       this.entitiesByComponent[tag] = new Set();
@@ -216,16 +267,16 @@ module.exports = class World {
     }
   }
 
-  registerComponent(klass, spinup = 1) {
+  registerComponent<T extends typeof Component>(klass: T, spinup = 1) {
     if (klass.typeName && klass.name !== klass.typeName) {
-      Object.defineProperty(klass, 'name', { value: klass.typeName });
+      Object.defineProperty(klass, "name", { value: klass.typeName });
     }
     const name = klass.name;
     // istanbul ignore if
     if (this.tags.has(name)) {
       throw new Error(`registerComponent: Tag already defined for "${name}"`);
     } /* istanbul ignore if */ else if (
-      this.componentTypes.hasOwnProperty(name)
+      Object.prototype.hasOwnProperty.call(this.componentTypes, name)
     ) {
       throw new Error(
         `registerComponent: Component already defined for "${name}"`
@@ -244,8 +295,9 @@ module.exports = class World {
             `Error registering ${klass.name}: Reserved property name "${field}"`
           );
         }
-        if (typeof klass.properties[field] === 'function') {
-          klass.factories[field] = klass.properties[field];
+        if (typeof klass.properties[field] === "function") {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+          (klass.factories[field] as Function) = klass.properties[field];
         } else {
           klass.primitives[field] = klass.properties[field];
         }
@@ -255,7 +307,7 @@ module.exports = class World {
     this.componentPool.set(name, new ComponentPool(this, name, spinup));
   }
 
-  createEntity(definition) {
+  createEntity(definition: IEntityConfig | IEntityObject): Entity {
     return this.entityPool.get(definition);
   }
 
@@ -267,13 +319,13 @@ module.exports = class World {
     return obj;
   }
 
-  createEntities(definition) {
-    for (const entityDef of definition) {
+  createEntities(definitions: IEntityConfig[] | IEntityObject[]) {
+    for (const entityDef of definitions) {
       this.createEntity(entityDef);
     }
   }
 
-  copyTypes(world, types) {
+  copyTypes(world: World, types: string[]) {
     for (const name of types) {
       if (world.tags.has(name)) {
         this.registerTags(name);
@@ -286,7 +338,7 @@ module.exports = class World {
     }
   }
 
-  removeEntity(id) {
+  removeEntity(id: Entity | string): void {
     let entity;
     if (id instanceof Entity) {
       entity = id;
@@ -294,31 +346,42 @@ module.exports = class World {
     } else {
       entity = this.getEntity(id);
     }
-    entity.destroy();
+    entity!.destroy();
   }
 
-  getEntity(entityId) {
+  getEntity(entityId: string): Entity | undefined {
     return this.entities.get(entityId);
   }
 
-  getEntities(type) {
-    if (typeof type !== 'string') {
+  getEntities(type: string | ComponentClass): Set<Entity> {
+    if (typeof type !== "string") {
       type = type.name;
     }
     const results = [...this.entitiesByComponent[type]];
-    return new Set(results.map((id) => this.getEntity(id)));
+    return new Set(
+      results
+        .map((id) => this.getEntity(id))
+        .filter((entity): entity is Entity => entity !== undefined)
+    );
   }
 
-  getComponent(id) {
+  getComponent(id: string) {
     return this.componentsById.get(id);
   }
 
-  createQuery(init) {
+  createQuery(init?: IQueryConfig) {
     return new Query(this, null, init);
   }
 
-  _sendChange(operation) {
-    if (this.componentTypes[operation.type].subbed) {
+  _sendChange(operation: {
+    op: string;
+    component: string;
+    entity: string | number;
+    property?: string;
+    target?: string;
+    type: string;
+  }) {
+    if ((this.componentTypes[operation.type] as typeof Component).subbed) {
       const systems = this.subscriptions.get(operation.type);
       // istanbul ignore if
       if (!systems) {
@@ -330,9 +393,13 @@ module.exports = class World {
     }
   }
 
-  registerSystem(group, system, initParams) {
+  registerSystem<T extends typeof System>(
+    group: string,
+    system: T | System,
+    initParams?: unknown[]
+  ): unknown {
     initParams = initParams || [];
-    if (typeof system === 'function') {
+    if (typeof system === "function") {
       system = new system(this, ...initParams);
     }
     if (!this.systems.has(group)) {
@@ -342,36 +409,37 @@ module.exports = class World {
     return system;
   }
 
-  runSystems(group) {
+  runSystems(group: string): void {
     const systems = this.systems.get(group);
     if (!systems) return;
     for (const system of systems) {
       system._preUpdate();
-      system.update(this.currentTick);
+      system.update(this._currentTick);
       system._postUpdate();
-      system.lastTick = this.currentTick;
+      system.lastTick = this._currentTick;
       if (system.changes.length !== 0) {
         system.changes = [];
       }
     }
   }
 
-  _entityUpdated(entity) {
+  _entityUpdated(entity: Entity) {
     // istanbul ignore else
     if (this.config.trackChanges) {
       this.updatedEntities.add(entity);
     }
   }
 
-  _addEntityComponent(name, entity) {
+  _addEntityComponent(name: string, entity: Entity) {
     this.entitiesByComponent[name].add(entity.id);
   }
 
-  _deleteEntityComponent(component) {
+  _deleteEntityComponent(component: Component) {
+    //@ts-expect-error: _meta
     this.entitiesByComponent[component.type].delete(component._meta.entityId);
   }
 
-  _clearIndexes(entity) {
+  _clearIndexes(entity: Entity) {
     for (const query of this.queries) {
       query._removeEntity(entity);
     }
@@ -385,9 +453,9 @@ module.exports = class World {
     this.updatedEntities.clear();
   }
 
-  _updateIndexesEntity(entity) {
+  _updateIndexesEntity(entity: Entity): void {
     for (const query of this.queries) {
       query.update(entity);
     }
   }
-};
+}

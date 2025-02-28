@@ -1,15 +1,15 @@
 class IdGenerator {
+  private gen_num: number = 0;
+  private prefix: string = "";
   constructor() {
-    this.gen_num = 0;
-    this.prefix = '';
     this.genPrefix();
   }
 
-  genPrefix() {
+  public genPrefix(): void {
     this.prefix = Date.now().toString(32);
   }
 
-  genId() {
+  public genId(): string {
     this.gen_num++;
     // istanbul ignore if
     if (this.gen_num === 4294967295) {
@@ -20,10 +20,9 @@ class IdGenerator {
   }
 }
 
-function setIntersection() {
-  let sets = Array.from(arguments),
-    setSizes = sets.map((set) => set.size),
-    smallestSetIndex = setSizes.indexOf(Math.min.apply(Math, setSizes)),
+function setIntersection<T>(...sets: Set<T>[]): Set<T> {
+  const setSizes = sets.map((set) => set.size),
+    smallestSetIndex = setSizes.indexOf(Math.min(...setSizes)),
     smallestSet = sets[smallestSetIndex],
     result = new Set(smallestSet);
 
@@ -41,18 +40,14 @@ function setIntersection() {
   return result;
 }
 
-function setUnion() {
-  let result = new Set();
+function setUnion<T>(...sets: (Set<T> | Array<T>)[]): Set<T> {
+  const result = new Set<T>();
 
-  Array.from(arguments).forEach((set) => {
+  sets.forEach((set) => {
     set.forEach((value) => result.add(value));
   });
 
   return result;
 }
 
-module.exports = {
-  IdGenerator,
-  setIntersection,
-  setUnion
-};
+export { IdGenerator, setIntersection, setUnion };

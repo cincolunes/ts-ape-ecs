@@ -1,29 +1,48 @@
-const BaseComponent = require('./component');
-const IdGenerator = require('./util').IdGenerator;
+import type Component from "./component";
+import type {
+  ComponentClass,
+  IComponentByType,
+  IComponentConfig,
+  IComponentObject,
+  IEntityComponents,
+  IEntityConfig,
+  IEntityObject,
+} from "./types";
+import { IdGenerator } from "./util";
+import type World from "./world";
+
 const idGen = new IdGenerator();
-
 class Entity {
-  constructor() {
-    this.types = {};
-    this.c = {};
-    this.id = '';
-    this.tags = new Set();
-    this.updatedComponents = 0;
-    this.updatedValues = 0;
-    this.destroyed = false;
-    this.ready = false;
+  private readonly types: IComponentByType = {};
+  public readonly c: IEntityComponents = {};
+  public declare readonly id: string;
+  private readonly tags = new Set<string>();
+  private _updatedComponents = 0;
+  public get updatedComponents() {
+    return this._updatedComponents;
   }
+  updatedValues = 0;
+  private destroyed = false;
+  private ready = false;
 
-  _setup(definition) {
+  declare readonly world: World;
+
+  _setup(definition: IEntityConfig | IEntityObject): void {
     this.destroyed = false;
     if (definition.id) {
-      this.id = definition.id;
+      Object.defineProperty(this, "id", {
+        value: definition.id,
+        writable: false,
+      });
     } else {
-      this.id = idGen.genId();
+      Object.defineProperty(this, "id", {
+        value: idGen.genId(),
+        writable: false,
+      });
     }
     this.world.entities.set(this.id, this);
 
-    this.updatedComponents = this.world.currentTick;
+    this._updatedComponents = this.world.currentTick;
 
     if (definition.tags) {
       for (const tag of definition.tags) {
@@ -42,9 +61,10 @@ class Entity {
       for (const key of Object.keys(defs)) {
         const comp = {
           ...defs[key],
-          key
+          key,
         };
-        if (!comp.type) comp.type = key;
+        if (!(comp as IComponentConfig).type)
+          (comp as IComponentConfig).type = key;
         this.addComponent(comp);
       }
     }
@@ -52,15 +72,20 @@ class Entity {
     this.world._entityUpdated(this);
   }
 
-  has(type) {
-    if (typeof type !== 'string') {
+  has(type: string | ComponentClass): boolean {
+    if (typeof type !== "string") {
       type = type.name;
     }
-    return this.tags.has(type) || this.types.hasOwnProperty(type);
+    return (
+      this.tags.has(type) ||
+      Object.prototype.hasOwnProperty.call(this.types, type)
+    );
   }
 
-  getOne(type) {
-    if (typeof type !== 'string') {
+  getOne(type: string): Component | undefined;
+  getOne<T extends Component>(type: { new (): T }): T | undefined;
+  getOne(type: string | ComponentClass): Component | undefined {
+    if (typeof type !== "string") {
       type = type.name;
     }
     let component;
@@ -71,34 +96,38 @@ class Entity {
     return component;
   }
 
-  getComponents(type) {
-    if (typeof type !== 'string') {
+  getComponents(type: string): Set<Component>;
+  getComponents<T extends Component>(type: { new (): T }): Set<T>;
+  getComponents(type: string | ComponentClass) {
+    if (typeof type !== "string") {
       type = type.name;
     }
     return this.types[type] || new Set();
   }
 
-  addTag(tag) {
+  addTag(tag: string) {
     // istanbul ignore next
     if (!this.world.tags.has(tag)) {
       throw new Error(`addTag "${tag}" is not registered. Type-O?`);
     }
     this.tags.add(tag);
-    this.updatedComponents = this.world.currentTick;
+    this._updatedComponents = this.world.currentTick;
     this.world.entitiesByComponent[tag].add(this.id);
     if (this.ready) {
       this.world._entityUpdated(this);
     }
   }
 
-  removeTag(tag) {
+  removeTag(tag: string) {
     this.tags.delete(tag);
-    this.updatedComponents = this.world.currentTick;
+    this._updatedComponents = this.world.currentTick;
     this.world.entitiesByComponent[tag].delete(this.id);
     this.world._entityUpdated(this);
   }
 
-  addComponent(properties) {
+  addComponent(
+    properties: IComponentConfig | IComponentObject
+  ): Component | undefined {
     const type = properties.type;
     const pool = this.world.componentPool.get(type);
     if (pool === undefined) {
@@ -110,15 +139,15 @@ class Entity {
     }
     this.types[type].add(comp);
     this.world._addEntityComponent(type, this);
-    this.updatedComponents = this.world.currentTick;
+    this._updatedComponents = this.world.currentTick;
     if (this.ready) {
       this.world._entityUpdated(this);
     }
     return comp;
   }
 
-  removeComponent(component) {
-    if (typeof component === 'string') {
+  removeComponent(component: Component | string): boolean {
+    if (typeof component === "string") {
       component = this.c[component];
     }
     if (component === undefined) {
@@ -138,17 +167,17 @@ class Entity {
     return true;
   }
 
-  getObject(componentIds = true) {
-    const obj = {
+  getObject(componentIds = true): IEntityObject {
+    const obj: IEntityObject = {
       id: this.id,
       tags: [...this.tags],
       components: [],
-      c: {}
+      c: {},
     };
     for (const type of Object.keys(this.types)) {
       for (const comp of this.types[type]) {
         // $lab:coverage:off$
-        if (!comp.constructor.serialize) {
+        if (!(comp.constructor as typeof Component).serialize) {
           continue;
         }
         // $lab:coverage:on$
@@ -163,18 +192,17 @@ class Entity {
   }
 
   destroy() {
-
     if (this.destroyed) return;
     if (this.world.refs[this.id]) {
       for (const ref of this.world.refs[this.id]) {
-        const [entityId, componentId, prop, sub] = ref.split('...');
+        const [entityId, componentId, prop, sub] = ref.split("...");
         const entity = this.world.getEntity(entityId);
         // istanbul ignore next
         if (!entity) continue;
         const component = entity.world.componentsById.get(componentId);
         // istanbul ignore next
         if (!component) continue;
-        const path = prop.split('.');
+        const path = prop.split(".");
 
         let target = component;
         let parent = target;
@@ -182,9 +210,9 @@ class Entity {
           parent = target;
           target = target[prop];
         }
-        if (sub === '__set__') {
+        if (sub === "__set__") {
           target.delete(this);
-        } else if (sub === '__obj__') {
+        } else if (sub === "__obj__") {
           delete parent[path[1]];
         } else {
           parent[prop] = null;
@@ -206,4 +234,4 @@ class Entity {
   }
 }
 
-module.exports = Entity;
+export default Entity;
